@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+overlay/extlibs/CudaRasterizer/CudaRasterizer/third_party/** -whitespace

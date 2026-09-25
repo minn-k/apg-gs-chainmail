@@ -1,0 +1,43 @@
+# Local configuration
+.env
+.vs/
+.vscode/
+.idea/
+
+# Build products
+build/
+install/
+out/
+CMakeFiles/
+CMakeCache.txt
+*.obj
+*.o
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.exe
+*.so
+
+# Python and logs
+__pycache__/
+*.py[cod]
+*.log
+
+# Data and generated outputs
+*.ply
+*.npz
+*.npy
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.mov
+*.mp4
+*.zip
+*.pptx
+*.docx
+
+# Local curation artifacts
+_work/
