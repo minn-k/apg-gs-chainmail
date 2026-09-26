@@ -2,7 +2,7 @@
 
 A focused source overlay for interactive deformation of 3D Gaussian Splatting scenes in the SIBR Gaussian viewer. The project builds a Gaussian-aware graph, propagates a user drag through a ChainMail solver, and updates Gaussian orientation and scale for real-time rendering.
 
-This repository preserves the earlier ChainMail research scope. The later OpenUSD, Isaac Sim, and two-arm XPBD runtime is released separately in `3dgs-isaac-sim-xpbd`.
+This repository preserves the earlier ChainMail research scope. The later OpenUSD, Isaac Sim, and two-arm XPBD runtime is released separately in [3dgs-isaac-sim-xpbd](https://github.com/minn-k/3dgs-isaac-sim-xpbd).
 
 ## What the system does
 
@@ -16,7 +16,7 @@ Trained 3DGS PLY
   → SIBR real-time renderer
 ~~~
 
-- **Gaussian graph.** Candidate neighbors come from a spatial k-NN search. Each edge combines center distance, quaternion orientation alignment, scale aspect-ratio difference, and luminance-weighted spherical-harmonic appearance similarity. Low dissimilarity scores become stronger ChainMail edges.
+- **Gaussian graph.** Candidate neighbors come from a spatial k-NN search. Each edge combines center distance, quaternion orientation alignment, scale aspect-ratio difference, and luminance-weighted spherical-harmonic appearance similarity. Low dissimilarity scores become stronger ChainMail edges. The default graph is built from every Gaussian in the loaded PLY; no scene-specific crop coordinates or point IDs are embedded in the runtime.
 - **Interactive deformation.** A picked Gaussian becomes a drag constraint. The solver propagates positional corrections through the graph, with CPU and CUDA ChainMail paths plus active-region updates for responsive interaction.
 - **Appearance-preserving update.** For each affected Gaussian, the CUDA path estimates a local affine deformation from rest and deformed neighbor offsets. A regularized least-squares estimate is decomposed into rotation and scale before the Gaussian covariance is updated for rendering.
 

@@ -3,7 +3,7 @@
  * GRAPHDECO research group, https://team.inria.fr/graphdeco
  * All rights reserved.
  *
- * This software is free for non-commercial, research and evaluation use 
+ * This software is free for non-commercial, research and evaluation use
  * under the terms of the LICENSE.md file.
  *
  * For inquiries contact  george.drettakis@inria.fr
@@ -22,7 +22,7 @@
 #include <glm/gtx/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <Eigen/SVD>
-#include <Eigen/Eigenvalues> 
+#include <Eigen/Eigenvalues>
 namespace cg = cooperative_groups;
 static float t = 0;
 
@@ -81,8 +81,8 @@ static void drainGpuCommands(std::vector<int>& outIdx, std::vector<glm::vec3>& o
 // coefficients of each Gaussian to a simple RGB color.
 __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs, bool* clamped)
 {
-	// The implementation is loosely based on code for 
-	// "Differentiable Point-Based Radiance Fields for 
+	// The implementation is loosely based on code for
+	// "Differentiable Point-Based Radiance Fields for
 	// Efficient View Synthesis" by Zhang et al. (2022)
 	glm::vec3 pos = means[idx];
 	glm::vec3 dir = pos - campos;
@@ -134,14 +134,14 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 
 // Forward version of 2D covariance matrix computation
 __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix,
-	
+
 	float rotX, float rotY, float rotZ
 
-	
+
 	 )
 {
 	// The following models the steps outlined by equations 29
-	// and 31 in "EWA Splatting" (Zwicker et al., 2002). 
+	// and 31 in "EWA Splatting" (Zwicker et al., 2002).
 	// Additionally considers aspect / scaling of viewport.
 	// Transposes used to account for row-/column-major conventions.
 	float3 t = transformPoint4x3(mean, viewmatrix);
@@ -289,8 +289,8 @@ __device__ inline void jacobiEigenDecomposition3x3(
 	for (int i = 0; i < 2; ++i) {
 		for (int j = i + 1; j < 3; ++j) {
 			if (eigenValues[i] > eigenValues[j]) {
-				float tmp = eigenValues[i]; 
-				eigenValues[i] = eigenValues[j]; 
+				float tmp = eigenValues[i];
+				eigenValues[i] = eigenValues[j];
 				eigenValues[j] = tmp;
 				// swap corresponding eigenvector columns
 				for (int r = 0; r < 3; ++r) {
@@ -335,242 +335,63 @@ __device__ inline void eigenDecomposition_glm(
 // Forward method for converting scale and rotation properties of each
 // Gaussian to a 3D covariance matrix in world space. Also takes care
 // of quaternion normalization.
-__device__ void computeCov3D(const glm::vec3 scale, float mod, const glm::vec4 rot, float* cov3D)
+__device__ void computeCov3D(const glm::vec3 scale, float scaleModifier, const glm::vec4 rotation, float* covariance)
 {
-	glm::mat3 C_local(0.0f);
+	glm::mat3 scaleMatrix(1.0f);
+	scaleMatrix[0][0] = scaleModifier * scale.x;
+	scaleMatrix[1][1] = scaleModifier * scale.y;
+	scaleMatrix[2][2] = scaleModifier * scale.z;
 
-	// Create scaling matrix
-	glm::mat3 S = glm::mat3(1.0f);
-	S[0][0] = mod * scale.x;
-	S[1][1] = mod * scale.y;
-	S[2][2] = mod * scale.z;
-	
-
-	// 2. 최종 스케일 = 체인메일 보정 행렬 * 원래 스케일
-
-	float r = rot.x;
-	float x = rot.y;
-	float y = rot.z;
-	float z = rot.w;
-
-	glm::mat3 R = glm::mat3(
+	const float r = rotation.x;
+	const float x = rotation.y;
+	const float y = rotation.z;
+	const float z = rotation.w;
+	const glm::mat3 rotationMatrix(
 		1.f - 2.f * (y * y + z * z), 2.f * (x * y - r * z), 2.f * (x * z + r * y),
 		2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
-		2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y)
-	);
+		2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y));
+	const glm::mat3 transform = scaleMatrix * rotationMatrix;
+	const glm::mat3 sigma = glm::transpose(transform) * transform;
 
-	glm::mat3 M =  S * R;
-	// Compute 3D world covariance matrix Sigma
-	glm::mat3 Sigma = glm::transpose(M) * M;//기존 코드rs strt
-
-	// Covariance is symmetric, only store upper right
-	cov3D[0] = Sigma[0][0];
-	cov3D[1] = Sigma[0][1];
-	cov3D[2] = Sigma[0][2];
-	cov3D[3] = Sigma[1][1];
-	cov3D[4] = Sigma[1][2];
-	cov3D[5] = Sigma[2][2];
+	covariance[0] = sigma[0][0];
+	covariance[1] = sigma[0][1];
+	covariance[2] = sigma[0][2];
+	covariance[3] = sigma[1][1];
+	covariance[4] = sigma[1][2];
+	covariance[5] = sigma[2][2];
 }
 
-
-__device__ void computeCov3D2(
-	const bool bubble,
+__device__ void computeDeformedCovariance(
 	const glm::vec3 scale,
-	const glm::mat3& R_deform,
-	const glm::mat3& S_deform,
-	glm::mat3 A,
-	float mod,
-	const glm::vec4 rot,
-	float* cov3D)
+	const glm::mat3& deformationRotation,
+	const glm::mat3& deformationStretch,
+	float scaleModifier,
+	const glm::vec4 rotation,
+	float* covariance)
 {
-	glm::mat3 C_local(0.0f);
+	glm::mat3 scaleMatrix(1.0f);
+	scaleMatrix[0][0] = scaleModifier * scale.x;
+	scaleMatrix[1][1] = scaleModifier * scale.y;
+	scaleMatrix[2][2] = scaleModifier * scale.z;
 
-
-
-
-	// 1. 상대 제한: 원래 크기의 몇 배까지 허용할 것인가? (추천: 2.0 ~ 5.0)
-	// 예: 3.0f면 원래 크기의 3배까지만 커질 수 있음.
-	const float RELATIVE_GROWTH_LIMIT = 1.5f;
-	const float MAX_ANISOTROPY = 0.7f;
-	// 2. 절대 제한: 아무리 커져도 이 값(월드 좌표계)은 넘지 마라.
-	// 사용자 데이터가 작다면 1.0f, 크다면 10.0f 등 조절 필요. (추천: 1.0f ~ 2.0f 부터 시작)
-	const float ABSOLUTE_HARD_CAP = 0.15f;
-	// [New] 표면 스무딩 파라미터
-	// 1.0에 가까울수록 A를 그대로 사용, 0.0에 가까울수록 변형을 무시하고 원래 회전 유지
-	// 값이 낮을수록 표면이 매끄러워지지만, 변형이 뻣뻣해질 수 있음. (추천: 0.7 ~ 0.9)
-	const float DEFORMATION_STIFFNESS = 0.5f;
-
-	// [New] 납작하게 누르기 (두께 압축)
-	// 가장 짧은 축을 더 짧게 만들어서 "빈대떡"처럼 만듭니다.
-	// 1.0이면 그대로, 0.1이면 10% 두께로 납작해짐. (추천: 0.3 ~ 0.6)
-	const float FLATTENING_RATIO = 0.4f;
-	const float MIN_THICKNESS_RATIO = 0.4f;
-	const float MAX_ASPECT_RATIO = 2.9f;    // 장축이 단축의 3배를 넘지 못하게 함 (뭉뚝하게)
-	// Create scaling matrix
-	glm::mat3 S = glm::mat3(1.0f);
-	S[0][0] = mod * scale.x;
-	S[1][1] = mod * scale.y;
-	S[2][2] = mod * scale.z;
-
-
-	//// 2. 최종 스케일 = 체인메일 보정 행렬 * 원래 스케일
-
-	float r = rot.x;
-	float x = rot.y;
-	float y = rot.z;
-	float z = rot.w;
-
-	glm::mat3 R = glm::mat3(
+	const float r = rotation.x;
+	const float x = rotation.y;
+	const float y = rotation.z;
+	const float z = rotation.w;
+	const glm::mat3 rotationMatrix(
 		1.f - 2.f * (y * y + z * z), 2.f * (x * y - r * z), 2.f * (x * z + r * y),
 		2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
-		2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y)
-	);
-	//glm::mat3 M = S * R;
-	//glm::mat3 M = S * R * S_deform * R_deform;
-	glm::mat3 M = S * R * S_deform * glm::transpose(R_deform);// Ra Sa (R S S^T R^T) Sa^T Ra^T
-	//glm::mat3 M = S * R  * glm::transpose(A);//Sa Ra (R S S^T R^T) Ra^T Sa^T = A sigma A^T
+		2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y));
+	const glm::mat3 transform = scaleMatrix * rotationMatrix * deformationStretch * glm::transpose(deformationRotation);
+	const glm::mat3 sigma = glm::transpose(transform) * transform;
 
-	
-	float max_orig_scale = fmaxf(scale.x, fmaxf(scale.y, scale.z));
-
-	//// 2. 허용 가능한 최대 반지름 결정
-	////    (원래크기 * mod * 3배) 와 (절대값 1.0) 중 더 작은 것을 선택
-	////    이렇게 하면 작은 가우시안은 작게 유지되고, 원래 큰 건 좀 더 커질 수 있음.
-	float allowed_radius = max_orig_scale * mod * 50.0f;
-
-	// 절대 제한(ABSOLUTE_HARD_CAP)을 넘지 못하게 막음 (안전장치)
-	if (allowed_radius > ABSOLUTE_HARD_CAP) {
-		allowed_radius = ABSOLUTE_HARD_CAP;
-	}
-	bool is_invalid = false;
-	//// 각 축을 검사하여 제한
-	for (int i = 0; i < 3; ++i) {
-		// NaN / Inf 체크 (시뮬레이션 폭발 감지)
-		//1000배까지만 커진다면 그냥 100에서 바로 잘라도됨
-		float current_len = glm::length(M[i]);
-		if (isnan(M[i].x) || isnan(M[i].y) || isnan(M[i].z) ||
-			isinf(M[i].x) || isinf(M[i].y) || isinf(M[i].z)) {
-			float s = allowed_radius / (current_len + 1e-7f);
-			M[i] *= s;
-			//M = glm::mat3(0.0f);
-			//break;
-		}
-		// 허용된 반지름보다 크면 강제로 줄임
-		if (current_len > allowed_radius&& !bubble) {
-			// 하드하게 s를 곱하는 대신, 초과분의 증가 속도를 늦춥니다.
-			float overflow = current_len / allowed_radius;
-			// 멱함수나 로그를 사용하여 부드럽게 억제 (예: overflow의 0.2승만 반영)
-			float soft_s = (allowed_radius * powf(overflow, 0.2f)) / current_len;
-			M[i] *= soft_s;
-			//float s = allowed_radius / (current_len + 1e-7f);
-			//M[i] *= s;			
-			//break;
-		}
-	}
-		// Compute 3D world covariance matrix Sigma
-		//glm::mat3 Sigma =  M * glm::transpose(M);
-		glm::mat3 Sigma_orig = transpose(M) * M;  // R^T S^2 R
-		//// 변형 텐서 F = R_deform * S_deform (극분해 결과 재결합)
-		//glm::mat3 F = R_deform * S_deform; // 두 개 모두 사용
-		//
-		//// 논문 Eq.6 직접 적용
-		//glm::mat3 Sigma = F * Sigma_orig * glm::transpose(F);
-		// Covariance is symmetric, only store upper right
-		cov3D[0] = Sigma_orig[0][0];
-		cov3D[1] = Sigma_orig[0][1];
-		cov3D[2] = Sigma_orig[0][2];
-		cov3D[3] = Sigma_orig[1][1];
-		cov3D[4] = Sigma_orig[1][2];
-		cov3D[5] = Sigma_orig[2][2];
+	covariance[0] = sigma[0][0];
+	covariance[1] = sigma[0][1];
+	covariance[2] = sigma[0][2];
+	covariance[3] = sigma[1][1];
+	covariance[4] = sigma[1][2];
+	covariance[5] = sigma[2][2];
 }
-
-
-
-
-
-// CUDA 코드 상단(전역 영역)에 추가
-//namespace FORWARD {
-//	__constant__ float mytime[1];
-//}
-//// 렌더링 루프 내부 또는 시간 업데이트 지점에서
-//float current_time = get_current_time(); // 사용자 정의 시간 획득 함수
-//cudaMemcpyToSymbol(mytime, &current_time, sizeof(float));
-// Perform initial steps for each Gaussian prior to rasterization.
-
-
-__device__ float3 expand_contract(float3 pos, float t, float3 center, float scale)
-{
-	float3 dis = make_float3( pos.x - center.x, pos.y - center.y, pos.z - center.z);
-	float len = sqrtf(dis.x * dis.x + dis.y * dis.y + dis.z * dis.z);
-	float size = sinf(t * 0.5f) * scale*1.3f; // scale: 전체 볼륨 크기의 10% 등
-	float s = (len > 1e-6f) ? ((len + size) / len) : 1.0f;
-	dis.x *= s;
-	dis.y *= s;
-	dis.z *= s;
-	float3 retval = make_float3(center.x + dis.x, center.y + dis.y, center.z + dis.z);	
-	// floorf는 계단현상이 필요할 때만 사용
-	// retval.x = floorf(retval.x); retval.y = floorf(retval.y); retval.z = floorf(retval.z);
-	return retval;
-}
-__device__ float3 twist(float3 pos, float t, float3 center, float theta_scale, float& out_theta)
-{
-	float3 dis = make_float3(pos.x - center.x, pos.y - center.y, pos.z - center.z);
-	float3 dis_xy = make_float3(dis.x, dis.y, 0.0f);
-	float theta = sinf(t * 0.3f) * (pos.z - center.z) * theta_scale;
-	out_theta = theta; // out parameter로 회전 각도 전달
-
-	float c = cosf(theta);
-	float s = sinf(theta);
-	float dx = c * dis_xy.x - s * dis_xy.y;
-	float dy = s * dis_xy.x + c * dis_xy.y;
-	float3 retval;
-	retval.x = center.x + dx;
-	retval.y = center.y + dy;
-	retval.z = pos.z;
-	return retval;
-}
-//__device__ float3 twist(float3 pos, float t, float3 center, float theta_scale, float& out_theta)
-//{
-//	// 중심 기준으로 좌표 변환
-//	float3 dis = make_float3(pos.x - center.x, pos.y - center.y, pos.z - center.z);
-//
-	// (x, z) 평면에서 y축을 중심으로 회전
-//	float theta = sinf(t * 0.3f) * (pos.y - center.y) * theta_scale;
-//	out_theta = theta; // out parameter로 회전 각도 전달
-//
-//	float c = cosf(theta);
-//	float s = sinf(theta);
-//	float dx = c * dis.x + s * dis.z;
-//	float dz = -s * dis.x + c * dis.z;
-//
-//	float3 retval;
-//	retval.x = center.x + dx;
-//	retval.y = pos.y; // y는 그대로
-//	retval.z = center.z + dz;
-//	return retval;
-//}
-__device__ float3 wave(float3 pos,float t)
-{
-	// Wave 변형 파라미터 (원하는 대로 조정)
-	float amplitude = 0.2f;  // 파동 높이
-	float freq = 2.0f;       // 파동 주파수
-	float speed = 3.0f;      // 시간에 따른 속도
-
-	// 예시: Y축을 sin 파동으로 변형
-	float wave = amplitude * sinf(freq * pos.x + speed * t);
-	float3 retval;
-	// X, Y, Z 각각에 웨이브를 다르게 줄 수도 있음
-	float3 p_wave;
-	retval.x = pos.x + wave; 
-	retval.y = pos.y + amplitude * cosf(freq * pos.x + speed * t);
-	retval.z = pos.z + amplitude * sinf(freq * pos.z + speed * t);
-
-	return retval;
-	// 결과 저장
-}
-
-
-
 
 // ===== math utils (device/host 공용) =====
 __host__ __device__ inline float3 make_f3(float x, float y, float z) { return make_float3(x, y, z); }
@@ -986,31 +807,6 @@ __device__ inline void svd(const glm::mat3& F, glm::mat3& U, glm::vec3& Sigma, g
 	// --- END OF CORRECTION ---
 	// --------------------------------------------------------------------------
 }
-__device__ void computeCov3D_withMatrix(const glm::mat3& S_final, const glm::vec4& rot, float* cov3D) {
-	glm::mat3 R = quatToMat3(rot);
-	glm::mat3 M = S_final * R;
-	glm::mat3 Sigma = glm::transpose(M) * M;
-
-	cov3D[0] = Sigma[0][0];
-	cov3D[1] = Sigma[1][1];
-	cov3D[2] = Sigma[2][2];
-	cov3D[3] = Sigma[0][1];
-	cov3D[4] = Sigma[0][2];
-	cov3D[5] = Sigma[1][2];
-}
-void eigenDecomposition(const Eigen::Matrix3f& A,
-	Eigen::Vector3f& eigenValues,
-	Eigen::Matrix3f& eigenVectors)
-{
-	Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> solver(A);
-
-	if (solver.info() != Eigen::Success) {
-		throw std::runtime_error("Eigen decomposition failed!");
-	}
-
-	eigenValues = solver.eigenvalues();   // 고유값
-	eigenVectors = solver.eigenvectors();  // 고유벡터 (정규직교화된 기저)
-}
 // device-side Jacobi for symmetric 3x3
 // A_in: row-major symmetric matrix (A_in[i][j])
 // outputs: eigenValues (ascending), eigenVectors (columns are eigenvectors)
@@ -1018,8 +814,6 @@ void eigenDecomposition(const Eigen::Matrix3f& A,
 // glm 매트릭스가 column-major이고 접근은 M[col][row] 이므로 변환에 주의.
 // 여기서는 A_in_rowmajor[i][j] = glmM[j][i] 로 복사 (행-열 맞춤)
 
-#define DEBUG_TARGET_IDX 44986 
-#define COMPILE_TIME_MAX_K 10 
 // device 함수: 3x3 역행렬 (adjoint 방식) + 성공 여부 반환
 __device__ bool inverse3x3_safe(const glm::mat3& m, glm::mat3& inv, float eps_det = 1e-12f)
 {
@@ -1028,7 +822,7 @@ __device__ bool inverse3x3_safe(const glm::mat3& m, glm::mat3& inv, float eps_de
 	float a20 = m[2][0], a21 = m[2][1], a22 = m[2][2];
 
 	float det = a00 * (a11 * a22 - a12 * a21) - a01 * (a10 * a22 - a12 * a20) + a02 * (a10 * a21 - a11 * a20);
-	
+
 	if (fabs(det) < eps_det) return false;
 	float invdet = 1.0f / det;
 
@@ -1045,110 +839,6 @@ __device__ bool inverse3x3_safe(const glm::mat3& m, glm::mat3& inv, float eps_de
 	inv[2][2] = (a00 * a11 - a01 * a10) * invdet;
 
 	return true;
-}
-__device__ Eigen::Matrix3f invert3x3(const Eigen::Matrix3f& m) {
-	float det =
-		m(0, 0) * (m(1, 1) * m(2, 2) - m(1, 2) * m(2, 1)) -
-		m(0, 1) * (m(1, 0) * m(2, 2) - m(1, 2) * m(2, 0)) +
-		m(0, 2) * (m(1, 0) * m(2, 1) - m(1, 1) * m(2, 0));
-
-	float invdet = 1.0f / (abs(det) > 1e-8f ? det : 1e-8f);
-
-	Eigen::Matrix3f inv;
-	inv(0, 0) = (m(1, 1) * m(2, 2) - m(1, 2) * m(2, 1)) * invdet;
-	inv(0, 1) = -(m(0, 1) * m(2, 2) - m(0, 2) * m(2, 1)) * invdet;
-	inv(0, 2) = (m(0, 1) * m(1, 2) - m(0, 2) * m(1, 1)) * invdet;
-	inv(1, 0) = -(m(1, 0) * m(2, 2) - m(1, 2) * m(2, 0)) * invdet;
-	inv(1, 1) = (m(0, 0) * m(2, 2) - m(0, 2) * m(2, 0)) * invdet;
-	inv(1, 2) = -(m(0, 0) * m(1, 2) - m(0, 2) * m(1, 0)) * invdet;
-	inv(2, 0) = (m(1, 0) * m(2, 1) - m(1, 1) * m(2, 0)) * invdet;
-	inv(2, 1) = -(m(0, 0) * m(2, 1) - m(0, 1) * m(2, 0)) * invdet;
-	inv(2, 2) = (m(0, 0) * m(1, 1) - m(0, 1) * m(1, 0)) * invdet;
-
-	return inv;
-}
-__device__ glm::mat3 polarDecomposition(const glm::mat3& A)
-{
-	// 1. A로부터 대칭 행렬 AtA (= S*S)를 계산합니다.
-	glm::mat3 AtA = glm::transpose(A) * A;
-
-	// 2. AtA를 고유값 분해합니다. (AtA = V * D * V_transpose)
-	glm::vec3 eigenvalues;      // D (대각성분)
-	glm::mat3 eigenvectors_V; // V
-	eigenDecomposition_glm(AtA, eigenvalues, eigenvectors_V);
-
-	// 3. 스트레칭 행렬 S를 계산합니다. S = V * sqrt(D) * V_transpose
-	glm::mat3 D_sqrt = glm::mat3(1.0f);
-	// 0보다 작은 eigenvalue에 sqrt를 적용하는 것을 방지
-	D_sqrt[0][0] = sqrtf(fmaxf(0.0f, eigenvalues.x));
-	D_sqrt[1][1] = sqrtf(fmaxf(0.0f, eigenvalues.y));
-	D_sqrt[2][2] = sqrtf(fmaxf(0.0f, eigenvalues.z));
-
-	glm::mat3 S = eigenvectors_V * D_sqrt * glm::transpose(eigenvectors_V);
-
-	// 4. 회전 행렬 R을 계산합니다. R = A * S의 역행렬
-	glm::mat3 S_inv = glm::inverse(S);
-	glm::mat3 R = A * S_inv;
-
-	// (안정성을 위해) 계산된 R의 determinant가 음수이면 반전된 것이므로 부호를 바꿔줍니다.
-	if (glm::determinant(R) < 0.0f) {
-		R *= -1.0f;
-	}
-
-	// --- 수정된 부분 ---
-	// 순수 회전 R과 순수 스트레칭 S를 곱하여
-	// 불안정한 요소가 제거된 '깨끗한 A'를 반환합니다.
-	return R * S;
-}
-// Eigen을 활용한 아주 깔끔한 반복 극분해 함수
-__device__ void extractRotationIterativeEigen(const Eigen::Matrix3f& A, Eigen::Matrix3f& R) {
-
-
-	// 1. 행렬 A의 크기(Frobenius Norm) 구하기
-	float sq_norm = 0.0f;
-	for (int i = 0; i < 3; ++i) {
-		for (int j = 0; j < 3; ++j) {
-			sq_norm += A(i, j) * A(i, j);
-		}
-	}
-	float norm = sqrtf(sq_norm);
-
-	// 2. 납작한 노이즈이거나 크기가 너무 작으면 "회전 포기! (단위 행렬)"
-	if (norm < 1e-10f) {
-		R = Eigen::Matrix3f::Identity();
-		return;
-	}
-
-	// 3. 핵심 비법: 스케일을 1.0으로 뻥튀기해서 반복문의 수렴 속도와 안정성을 극대화!
-	R = A / norm;
-
-	for (int iter = 0; iter < 10; ++iter) {
-		float det =
-			R(0, 0) * (R(1, 1) * R(2, 2) - R(1, 2) * R(2, 1)) -
-			R(0, 1) * (R(1, 0) * R(2, 2) - R(1, 2) * R(2, 0)) +
-			R(0, 2) * (R(1, 0) * R(2, 1) - R(1, 1) * R(2, 0));
-
-		// 중간에 행렬이 찌그러지면 회전을 멈추고 단위 행렬 반환
-		if (abs(det) < 1e-8f) {
-			R = Eigen::Matrix3f::Identity();
-			return;
-		}
-
-		Eigen::Matrix3f invR = invert3x3(R);
-		R = 0.5f * (R + invR.transpose());
-	}
-
-
-	//R = A; // 초기 R을 A로 설정
-	//
-	//for (int iter = 0; iter < 10; ++iter) {
-	//	// 1. 역행렬 구하기 (상민님의 invert3x3 재활용!)
-	//	Eigen::Matrix3f invR = invert3x3(R);
-	//
-	//	// 2. R_{next} = 0.5 * (R + (invR)^T) 
-	//	// Eigen의 transpose() 덕분에 코드가 예술적으로 짧아집니다.
-	//	R = 0.5f * (R + invR.transpose());
-	//}
 }
 //// 16개의 이웃(Neighbor) 데이터를 한 번에 처리하여 PPt, QPt를 계산하는 커널
 //__global__ void compute_deformation_gradient_tensorcore(
@@ -1227,7 +917,7 @@ __device__ void extractRotationIterativeEigen(const Eigen::Matrix3f& A, Eigen::M
 template<int C>
 __global__ void preprocessCUDA(int P, int D, int M,
 	const float* orig_points,
-	const float* realOrigin_points,       
+	const float* realOrigin_points,
 	// chainmail 후 (매 프레임 갱신)
 	// --- neighborhood for 3D F ---
 	const int* nbr_index,    // size: P*MAX_K
@@ -1238,16 +928,9 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const glm::vec3* scales,
 	const float scale_modifier,
 
-	const float _rotatingModifier_COV3D_Matrix_x,
-	const float _rotatingModifier_COV3D_Matrix_y,
-	const float _rotatingModifier_COV3D_Matrix_z,
 	const float _rotatingModifier_COV2D_Matrix_x,
 	const float _rotatingModifier_COV2D_Matrix_y,
 	const float _rotatingModifier_COV2D_Matrix_z,
-
-	const float _pivotRotX,
-	const float _pivotRotY,
-	const float _pivotRotZ,
 
 	const glm::vec4* rotations,
 	const float* opacities,
@@ -1275,9 +958,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float3 boxmax,
 	bool antialiasing,
 	float t,
-	bool _wave,
-	bool _twist,
-	bool _bubble
+	bool enableDeformationCovariance
 	)
 {
 	const float* cov3D;
@@ -1297,13 +978,13 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		return;
 	// Transform point by projecting
 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
-	
+
 	// 1. 좌표 정보 가져오기 (올바른 매핑)
 	float3 p_original = { realOrigin_points[3 * idx], realOrigin_points[3 * idx + 1], realOrigin_points[3 * idx + 2] };  // 변형 전
 	float diff = glm::length(glm::vec3(p_orig.x, p_orig.y, p_orig.z) -
 		glm::vec3(p_original.x, p_original.y, p_original.z));
 
-	
+
 
 	if (p_orig.x < boxmin.x || p_orig.y < boxmin.y || p_orig.z < boxmin.z ||
 		p_orig.x > boxmax.x || p_orig.y > boxmax.y || p_orig.z > boxmax.z)
@@ -1311,71 +992,19 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 
 
-	float rx = glm::radians(_pivotRotX);
-	float ry = glm::radians(_pivotRotY);
-	float rz = glm::radians(_pivotRotZ);
-
-
-	//회전행렬
-	glm::mat4 RX = glm::mat4(
-		1, 0, 0, 0,
-		0, cos(rx), -sin(rx), 0,
-		0, sin(rx), cos(rx), 0,
-		0, 0, 0, 1);
-	glm::mat4 RY = glm::mat4(
-		cos(ry), 0, sin(ry), 0,
-		0, 1, 0, 0,
-		-sin(ry), 0, cos(ry), 0,
-		0, 0, 0, 1);
-	glm::mat4 RZ = glm::mat4(
-		cos(rz), -sin(rz), 0, 0,
-		sin(rz), cos(rz), 0, 0,
-		0, 0, 1, 0,
-		0, 0, 0, 1);
-	glm::mat4 QR = RZ * RY * RX;
-	
-	glm::vec3 pivot = glm::vec3(0.5f,-0.001f,0.0f);
-	float dx = p_orig.x - pivot.x; 
-	float dy = p_orig.y - pivot.y; 
-	float dz = p_orig.z - pivot.z; 
-	float dist2 = dx * dx + dy * dy + dz * dz; 
-	float radius = 3.0f;
-	glm::vec4 Rot; 
-	bool applyRotation = dist2 < radius* radius;
-	// 중심 (0,0,0) 기준 ROI 범위
-	// 중심
-	// ===============================
-// (0,0,0) 기준 국소 ROI 바운딩 박스
-// ===============================
-	if (/*applyRotation*/true) { 
-		// 좌표 변환 
-		glm::vec4 p4 = glm::vec4(p_orig.x, p_orig.y, p_orig.z, 1.0f); 
-		p4 = QR * p4;
-		p_orig = make_float3(p4.x, p4.y, p4.z);
-	}
-	
-
-	
 	float4 p_hom = transformPoint4x4(p_orig, projmatrix);
 	float p_w = 1.0f / (p_hom.w + 0.0000001f);
 	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
-	// 0) 데이터 준비
-	glm::vec3 xi = glm::vec3(orig_points[3 * idx + 0], orig_points[3 * idx + 1], orig_points[3 * idx + 2]);   // 현재(체인메일 후)
-	glm::vec3 xi0 = glm::vec3(realOrigin_points[3 * idx + 0], realOrigin_points[3 * idx + 1], realOrigin_points[3 * idx + 2]); // 초기
-
 	int kn = nbr_count[idx];
 	kn = min(kn, MAX_K);
-	const float deform_eps = 1e-2f;
+	const float deformationEpsilon = 1e-2f;
 
 
-	
+
 
 
 	/////////////////////////////////////////////////////////////////////////////////
-	glm::vec3 final_new_scales = scales[idx]; // 기본값은 현재 스케일
-	glm::quat final_new_rotation(rotations[idx].x, rotations[idx].y, rotations[idx].z, rotations[idx].w); // 기본값은 원래 회전값으로 설정
-	// << 1. 변환 행렬 A를 계산하는 로직 >>
-	glm::mat3 A_final;
+	// Estimate a local affine deformation from rest/deformed neighbor offsets.
 	glm::mat3 R;
 	glm::mat3 S_final;
 	glm::vec3 S_vec;
@@ -1383,24 +1012,21 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	if (kn < 3)
 	{
 		// A 계산을 시도하지 않고, 변형이 없는 항등 행렬을 반환
-		A_final = glm::mat3(1.0f);
 		ok = false;
-	} 
+	}
 	else
 	{
 		glm::mat3 PPt(0.0f);
 		glm::mat3 QPt(0.0f);
-		//glm::vec3 delta_vectors[COMPILE_TIME_MAX_K];
 		//int valid_delta_count = 0;
 		glm::vec3 original_pos = glm::vec3(
-			realOrigin_points[3 * idx], 
-			realOrigin_points[3 * idx + 1], 
+			realOrigin_points[3 * idx],
+			realOrigin_points[3 * idx + 1],
 			realOrigin_points[3 * idx + 2]);
 		glm::vec3 deformed_pos = glm::vec3(
-			orig_points[3 * idx], 
-			orig_points[3 * idx + 1], 
+			orig_points[3 * idx],
+			orig_points[3 * idx + 1],
 			orig_points[3 * idx + 2]);
-		const float sigma_sq = 0.01f;
 		for (int i = 0; i < kn; ++i) {
 			int neighbor_idx = nbr_index[idx * MAX_K + i];
 			glm::vec3 nbr_original_pos = glm::vec3(
@@ -1412,7 +1038,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 				orig_points[3 * neighbor_idx + 1],
 				orig_points[3 * neighbor_idx + 2]);
 			// 그대로 행렬에 삽입
-			
+
 			  // 중심 기준 상대 좌표 (delta 벡터)
 			glm::vec3 p = nbr_original_pos - original_pos;
 			glm::vec3 q = nbr_deformed_pos - deformed_pos;
@@ -1421,11 +1047,11 @@ __global__ void preprocessCUDA(int P, int D, int M,
 			//glm::vec3 q = nbr_deformed_pos;
 
 			// 2. 벡터 변화 확인 (늘어났는지 줄어들었는지)
-		
+
 			PPt += glm::outerProduct(p, p); // P * P^T
 			QPt += glm::outerProduct(q, p); // Q * P^T
 		}
-		
+
 		//computePPtQPt_ptx(p_list, q_list, kn, PPt, QPt);
 		// 안정성을 위해 PPt에 작은 값을 더해줌 (레귤러라이제이션)
 		float tracePPt = PPt[0][0] + PPt[1][1] + PPt[2][2];
@@ -1442,9 +1068,9 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		glm::mat3 invPPt;
 		ok = inverse3x3_safe(PPt, invPPt, 1e-8f);
 		glm::mat3 A;
-		
+
 		if (ok) {
-			
+
 			A = QPt * invPPt; //glm::inverse(PPt);
 			 // 2. A를 SVD를 통해 U, S, V로 분해
 			glm::mat3 AtA = glm::transpose(A) * A;
@@ -1502,7 +1128,6 @@ __global__ void preprocessCUDA(int P, int D, int M,
 				glm::vec3(0, 0, S_vec.z));
 			S_final = V * S_final_diag * glm::transpose(V);
 
-			A_final = S_final * R;
 		}
 		else {
 			// fallback: identity 또는 작게 블렌딩
@@ -1510,59 +1135,32 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		}
 	}
 
-	glm::mat3 s_base(1.0f);
-	float final_opacity = opacities[idx];
-
-
-	if (_twist && diff > deform_eps&& ok) {
-		if (_bubble) {
-			S_final = glm::mat3(1.0f);
-		}
-		computeCov3D2(
-			_bubble,
+	if (enableDeformationCovariance && diff > deformationEpsilon && ok) {
+		computeDeformedCovariance(
 			scales[idx],
-			R,                  // 변형에서 얻은 회전
-			S_final,              // 변형에서 얻은 스케일
-			A_final,
+			R,
+			S_final,
 			scale_modifier,
 			rotations[idx],
-			cov3Ds + idx * 6);
-	}else if (_wave) {
-		
-		// 원래 회전 쿼터니언 
-		glm::quat originalRot(rotations[idx].x, rotations[idx].y, rotations[idx].z, rotations[idx].w); 
-		// 새 회전 쿼터니언 생성 
-		glm::quat pivotRot = glm::quat(glm::mat3(QR));
-		// 두 회전 결합 (왼쪽에서 오른쪽으로 적용) 
-		glm::quat newRot = pivotRot * originalRot; 
-		// 정규화
-		newRot = glm::normalize(newRot); 
-		// 수정된 회전으로 공분산 행렬 계산 
-		//glm::quat ->> w x y z 순서 
-		glm::vec4 modifiedRot(newRot.w, newRot.x, newRot.y, newRot.z);
-		computeCov3D(
-			scales[idx], 
-			scale_modifier,
-			modifiedRot,
 			cov3Ds + idx * 6);
 	}
 	else {
 		// 변형이 거의 없으면 기존 값 유지
 		computeCov3D(
 			scales[idx],
-			scale_modifier, 
+			scale_modifier,
 			rotations[idx],
 			cov3Ds + idx * 6);
 	}
 
 	cov3D = cov3Ds + idx * 6;
-		
+
 		// If 3D covariance matrix is precomputed, use it, otherwise compute
-		// from scaling and rotation parameters. 
-	
+		// from scaling and rotation parameters.
+
 	// Compute 2D screen-space covariance matrix
-	float3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix, 
-		
+	float3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix,
+
 		_rotatingModifier_COV2D_Matrix_x,
 		_rotatingModifier_COV2D_Matrix_y,
 		_rotatingModifier_COV2D_Matrix_z
@@ -1572,7 +1170,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	constexpr float h_var = 0.3f;
 	const float det_cov = cov.x * cov.z - cov.y * cov.y;
-	//가우시안이 카메라에서 너무 멀어지면 화면상에서 1픽셀보다 작아져 반짝거리는 현상(Aliasing)이 생김. 
+	//가우시안이 카메라에서 너무 멀어지면 화면상에서 1픽셀보다 작아져 반짝거리는 현상(Aliasing)이 생김.
 	//따라서 행렬대각 성분(x, z)에 강제로 0.3 분산더해 최소한의 크기보장(고전적인 EWA Splatting 기법)
 	cov.x += h_var;
 	cov.z += h_var;
@@ -1593,7 +1191,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	// Compute extent in screen space (by finding eigenvalues of
 	// 2D covariance matrix). Use extent to compute a bounding rectangle
 	// of screen-space tiles that this Gaussian overlaps with. Quit if
-	// rectangle covers 0 tiles. 
+	// rectangle covers 0 tiles.
 	//투영된 가우시안이 화면에서 얼마나 크게 퍼지는지 최대 반지름my_radius
 	float mid = 0.5f * (cov.x + cov.z);
 	float lambda1 = mid + sqrt(max(0.1f, mid * mid - det));
@@ -1646,7 +1244,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 }
 
 // Main rasterization method. Collaboratively works on one tile per
-// block, each thread treats one pixel. Alternates between fetching 
+// block, each thread treats one pixel. Alternates between fetching
 // and rasterizing data.
 template <uint32_t CHANNELS>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
@@ -1719,12 +1317,12 @@ renderCUDA(
 			// Keep track of current position in range
 			contributor++;
 
-			// Resample using conic matrix (cf. "Surface 
+			// Resample using conic matrix (cf. "Surface
 			// Splatting" by Zwicker et al., 2001)
 			float2 xy = collected_xy[j];
 			float2 d = { xy.x - pixf.x, xy.y - pixf.y };
 			float4 con_o = collected_conic_opacity[j];
-			float power = 
+			float power =
 				-0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y)
 				- con_o.y * d.x * d.y;
 			if (power > 0.0f)
@@ -1733,7 +1331,7 @@ renderCUDA(
 			// Eq. (2) from 3D Gaussian splatting paper.
 			// Obtain alpha by multiplying with Gaussian opacity
 			// and its exponential falloff from mean.
-			// Avoid numerical instabilities (see paper appendix). 
+			// Avoid numerical instabilities (see paper appendix).
 			float alpha = min(0.99f, con_o.w * exp(power));
 			if (alpha < 1.0f / 255.0f)
 				continue;
@@ -1771,7 +1369,7 @@ renderCUDA(
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
 		if (id_buffer != nullptr && picked_id != -1)
 		{
-			id_buffer[pix_id] = picked_id;//pix_id 는 픽셀인덱스 즉 몇번픽셀에 몇번가우시안인지 담기. 
+			id_buffer[pix_id] = picked_id;//pix_id 는 픽셀인덱스 즉 몇번픽셀에 몇번가우시안인지 담기.
 		}
 	}
 }
@@ -1806,32 +1404,32 @@ void FORWARD::render(
 }
 bool FORWARD::ChainMail::loadGraph(
 	ChainMail& cm,
-	const std::vector<Pos>& cropped_pos,
-	const std::vector<Edge>& cropped_edges,
-	const std::vector<float>& cropped_opacity
+	const std::vector<Pos>& positions,
+	const std::vector<Edge>& edges,
+	const std::vector<float>& opacities
 ) {
 
-	// 1. Elements 초기화
+	// Initialize solver elements from Gaussian positions.
 	cm.elements.clear();
-	cm.elements.resize(cropped_pos.size());
-	for (int i = 0; i < cropped_pos.size(); ++i) {
-		cm.elements[i].pos = cropped_pos[i];
+	cm.elements.resize(positions.size());
+	for (int i = 0; i < positions.size(); ++i) {
+		cm.elements[i].pos = positions[i];
 		cm.elements[i].vel = glm::vec3(0.0f);
 		cm.elements[i].invMass = 1.0f;
-		cm.elements[i].density = cropped_opacity[i];     // 기본값
+		cm.elements[i].density = opacities[i];     // 기본값
 		cm.elements[i].time = 1e9f;
 		cm.elements[i].offset = 0;
 		cm.elements[i].neighborCnt = 0;
 	}
 
-	// 2. Edge Neighbor 변환 준비
+	// Convert graph edges to adjacency lists.
 	cm.cedges.clear();
-	cm.cedges.reserve(cropped_edges.size());
-	std::vector<std::vector<Neighbor>> tempNeigh(cropped_pos.size());
-	for (const auto& e : cropped_edges) {
+	cm.cedges.reserve(edges.size());
+	std::vector<std::vector<Neighbor>> tempNeigh(positions.size());
+	for (const auto& e : edges) {
 		const int a = e.m_vert[0];
 		const int b = e.m_vert[1];
-		if (a < 0 || b < 0 || a >= (int)cropped_pos.size() || b >= (int)cropped_pos.size() || a == b) {
+		if (a < 0 || b < 0 || a >= (int)positions.size() || b >= (int)positions.size() || a == b) {
 			continue;
 		}
 		tempNeigh[a].emplace_back(b, e.rl, e.st);
@@ -1843,10 +1441,10 @@ bool FORWARD::ChainMail::loadGraph(
 		cm.cedges.push_back(ce);
 	}
 
-	// 3. Neighbor 배열 Flatten
+	// Flatten adjacency lists for the solver.
 	cm.neighbors.clear();
 	int idx = 0, offset = 0;
-	for (int i = 0; i < cropped_pos.size(); ++i) {
+	for (int i = 0; i < positions.size(); ++i) {
 		auto& elem = cm.elements[i];
 		elem.offset = offset;
 		elem.neighborCnt = static_cast<int>(tempNeigh[i].size());
@@ -1859,16 +1457,6 @@ bool FORWARD::ChainMail::loadGraph(
 	}
 	return true;
 }
-//void FORWARD::SetChainMailGraphFromVectors(
-//	const std::vector<Pos>& cropped_pos,
-//	const std::vector<Edge>& cropped_edges,
-//	const std::vector<float>& cropped_opacity
-//) {
-//	// 그래프는 CPU에서 한 번만 구성
-//	/*FORWARD::g_chainmail.loadGraph(g_chainmail, cropped_pos, cropped_edges, cropped_opacity);
-//	FORWARD::g_chainmail_ready = true;}*/
-
-
 FORWARD::CMConstraint h_AIR(
 	0.1f, 0.1f, 0.1f,   // dx, dy, dz
 	0.1f, 0.1f,         // xShearY, xShearZ
@@ -1913,50 +1501,6 @@ void FORWARD::ChainMail::movePointPos(int* idx, const glm::vec3& dpos, std::vect
 	elements[*idx].time = 0.0f;
 	activeSet.push_back(*idx);
 }
-int FORWARD::ChainMail::findCheekPoint(FORWARD::ChainMail& cm) {
-	int bestIdx = -1;
-	float bestScore = -1e9;
-
-	// 중심
-	glm::vec3 center(0.0f);
-	for (int i = 0; i < cm.numElements(); ++i)
-		center += cm.getElement(i).pos;
-	center /= (float)cm.numElements();
-
-	// 얼굴 평균 깊이
-	float meanZ = 0.0f;
-	for (int i = 0; i < cm.numElements(); ++i)
-		meanZ += cm.getElement(i).pos.z;
-	meanZ /= cm.numElements();
-
-	// 최대 허용 깊이 (뒤로 너무 간 점 제외)
-	float maxAllowedZ = meanZ + 0.2f;
-
-	for (int i = 0; i < cm.numElements(); ++i) {
-		glm::vec3 p = cm.getElement(i).pos;
-
-		// 먼지 제거 ① : 깊이 필터
-		if (p.z > maxAllowedZ) continue;
-
-		// 먼지 제거 ② : 로컬 밀도 검사
-		int neighborCount = 0;
-		for (int j = 0; j < cm.numElements(); ++j) {
-			if (i == j) continue;
-			float d = glm::length(p - cm.getElement(j).pos);
-			if (d < 0.05f) neighborCount++; // half cm 안에 이웃
-		}
-		if (neighborCount < 5) continue; // 이웃 거의 없으면 먼지
-
-		// 뺨 스코어
-		float score = fabs(p.x) - 0.1f * p.z;
-		if (score > bestScore) {
-			bestScore = score;
-			bestIdx = i;
-		}
-	}
-	return bestIdx;
-}
-
 /**
  * @brief 시작점으로부터 그래프 연결성을 따라 n개의 인접 정점을 수집함
  * @param startNode 마우스 클릭 등으로 선택된 시작 가우시안 인덱스
@@ -2503,7 +2047,7 @@ void FORWARD::ChainMail::Stabilize(const std::vector<int>& activeSet) {
 }
 void FORWARD::ChainMail::relax2(const std::vector<int>& activeSet) {
 	// [변경 1] newPos 벡터 제거 (메모리 절약 + 속도 향상)
-	// std::vector<glm::vec3> newPos(elements.size()); 
+	// std::vector<glm::vec3> newPos(elements.size());
 
 	float stiffness = 0.9f; // 원하시는 대로 유지
 
@@ -2519,7 +2063,7 @@ void FORWARD::ChainMail::relax2(const std::vector<int>& activeSet) {
 		for (int j = 0; j < e.neighborCnt; ++j) {
 			const Neighbor& n = neighbors[e.offset + j];
 
-			// [핵심] n.idx의 위치를 가져올 때, 앞서 계산된 이웃이라면 
+			// [핵심] n.idx의 위치를 가져올 때, 앞서 계산된 이웃이라면
 			// 이미 보정된 '최신 위치'를 가져오게 되어 전파 속도가 2배 이상 빨라집니다.
 			const Element& nb = elements[n.idx];
 			CMConstraint nConstraint = getConstraint(nb.density);
@@ -2692,13 +2236,13 @@ static bool chainmailInit = false;
 void FORWARD::setPickingParams(int hops)
 {
 	bfsHops = (hops < 0) ? 0 : hops;
-	
+
 }
 
 void FORWARD::getPickingParams(int* hops)
 {
 	if (hops) *hops = bfsHops;
-	
+
 }
 
 bool FORWARD::copyCurrentDeformedPositions(float* outXYZ, int pointCount)
@@ -3889,7 +3433,7 @@ static int g_currentAnchorIdx = -1;
 // 매 프레임 할당을 피하기 위한 정적 버퍼
 static int* d_idx_static = nullptr;
 static float3* d_delta_static = nullptr;
-static const int MAX_SEEDS = 10000; 
+static const int MAX_SEEDS = 10000;
 
 static void applySeedCommandsGPU(FORWARD::ChainMail& cm)
 {
@@ -3908,7 +3452,7 @@ static void applySeedCommandsGPU(FORWARD::ChainMail& cm)
     }
 
     // 2. BFS 이웃 확장
-    
+
     std::set<int> selectedNodes;
     std::queue<std::pair<int, int>> q;
     glm::vec3 totalDelta(0.0f);
@@ -3924,10 +3468,10 @@ static void applySeedCommandsGPU(FORWARD::ChainMail& cm)
     }
 
     if (selectedNodes.empty()) return;
-    
+
     // 평균 이동량 및 대표 앵커 설정
     glm::vec3 avgDelta = totalDelta / (float)cmdIdx.size();
-    g_currentAnchorIdx = cmdIdx[0]; 
+    g_currentAnchorIdx = cmdIdx[0];
 
     while (!q.empty()) {
         auto current = q.front(); q.pop();
@@ -3959,7 +3503,7 @@ static void applySeedCommandsGPU(FORWARD::ChainMail& cm)
 
     // 4. GPU 전송 및 커널 실행
     const int count = static_cast<int>(h_idx.size());
-    
+
     // 정적 버퍼 초기화 (1회)
     if (!d_idx_static) {
         cudaMalloc(&d_idx_static, sizeof(int) * MAX_SEEDS);
@@ -3986,7 +3530,7 @@ static void applySeedCommandsGPU(FORWARD::ChainMail& cm)
         d_pos_curr,
         d_time_curr,
         g_useActiveMap ? d_active_map : nullptr);
-    
+
     cudaDeviceSynchronize();
 }
 static void runChainmailRelaxGPU(FORWARD::ChainMail& cm, int iterations, float stiffness, float damping, bool uploadFromCPU)
@@ -4056,7 +3600,7 @@ static void runChainmailGPU(FORWARD::ChainMail& cm, int propIters, int relaxIter
 
 	const int N = static_cast<int>(cm.numElements());// 처리할 가우시안 개수
 	const int threads = 256;// 블록당 스레드 수
-	const int blocks = (N + threads - 1) / threads;// N 개를 256개 씩 나눠서 처리, 단 나머지가 있을 시 블록 하나 더 생성. 
+	const int blocks = (N + threads - 1) / threads;// N 개를 256개 씩 나눠서 처리, 단 나머지가 있을 시 블록 하나 더 생성.
 	const bool useInertia = (g_cmInertiaGain > 0.0f);
 	if (useInertia) {
 		cudaMemcpy(d_pos_prev, d_pos_curr, sizeof(float3) * N, cudaMemcpyDeviceToDevice);
@@ -4250,7 +3794,7 @@ static void runChainmailGPU(FORWARD::ChainMail& cm, int propIters, int relaxIter
 #include <iostream>
 #include <algorithm>
 void FORWARD::preprocess(
-	FORWARD::ChainMail& cm, 
+	FORWARD::ChainMail& cm,
 	std::vector<int>& activeSet,
 
 	int P, int D, int M,
@@ -4258,16 +3802,9 @@ void FORWARD::preprocess(
 	int nbr_K,
 	const glm::vec3* scales,
 	const float scale_modifier,
-	const float _rotatingModifier_COV3D_Matrix_x,
-	const float _rotatingModifier_COV3D_Matrix_y,
-	const float _rotatingModifier_COV3D_Matrix_z,
 	const float _rotatingModifier_COV2D_Matrix_x,
 	const float _rotatingModifier_COV2D_Matrix_y,
-	const float _rotatingModifier_COV2D_Matrix_z,
-	const float _pivotRotX,
-	const float _pivotRotY,
-	const float _pivotRotZ,
-	const glm::vec4* rotations,
+	const float _rotatingModifier_COV2D_Matrix_z,	const glm::vec4* rotations,
 	const float* opacities,
 	const float* shs,
 	bool* clamped,
@@ -4292,9 +3829,7 @@ void FORWARD::preprocess(
 	float3 boxmin,
 	float3 boxmax,
 	bool antialiasing,float t,
-	bool _wave,
-	bool _twist,
-	bool _bubble
+	bool enableDeformationCovariance
 	)
 {
 	const bool useGpuChainmail = (g_GpuChainmailMode == 1);
@@ -4377,9 +3912,9 @@ void FORWARD::preprocess(
 				std::chrono::high_resolution_clock::now() - cpu_prop_start).count();
 		}
 	}
-	
+
 	// 측정 종료: Propagation
-	
+
 
 	// 측정 시작: Covariance Update (CUDA Kernel)
 	cudaEventRecord(ev_cov_start);
@@ -4391,20 +3926,27 @@ void FORWARD::preprocess(
 	//cm.propagate(activeSet);
 	//cm.relax(activeSet);
 
-	// -------- 한번만 실행되는 영역 --------
+	// Allocate the per-scene deformation buffers on demand.
 	static bool initialized = false;
+	static int allocatedPointCount = 0;
+	static int allocatedNeighborCapacity = 0;
 	static float* d_means3D = nullptr;
 	static int* nbr_index = nullptr;
 	static int* nbr_count = nullptr;
 	static float* nbr_time = nullptr;
 
-	static int Ncount = nbr_K-1;
-	if (!initialized) {
+	const int Ncount = std::max(1, nbr_K);
+	if (!initialized || allocatedPointCount != P || allocatedNeighborCapacity != Ncount) {
+		cudaFree(d_means3D);
+		cudaFree(nbr_index);
+		cudaFree(nbr_count);
+		cudaFree(nbr_time);
 		cudaMallocManaged(&d_means3D, sizeof(float) * 3 * P);
 		cudaMallocManaged(&nbr_index, sizeof(int) * P * Ncount);
 		cudaMallocManaged(&nbr_count, sizeof(int) * P);
 		cudaMallocManaged(&nbr_time, sizeof(float) * P);
-
+		allocatedPointCount = P;
+		allocatedNeighborCapacity = Ncount;
 		initialized = true;
 	}
 	// Expose the latest deformed positions buffer for debug visualization.
@@ -4437,11 +3979,12 @@ void FORWARD::preprocess(
 	else {
 		for (int i = 0; i < P; ++i) {
 			Element E = cm.getElement(i);
-			for (int k = 0; k < E.neighborCnt; ++k) {
+			const int neighborCount = std::min(E.neighborCnt, Ncount);
+			for (int k = 0; k < neighborCount; ++k) {
 				Neighbor n = cm.getNeighbor(E.offset + k);
 				nbr_index[i * Ncount + k] = n.idx;
 			}
-			nbr_count[i] = E.neighborCnt;
+			nbr_count[i] = neighborCount;
 			d_means3D[3 * i + 0] = E.pos.x;
 			d_means3D[3 * i + 1] = E.pos.y;
 			d_means3D[3 * i + 2] = E.pos.z;
@@ -4463,22 +4006,15 @@ void FORWARD::preprocess(
 		scale_modifier,
 
 
-		_rotatingModifier_COV3D_Matrix_x,
-		_rotatingModifier_COV3D_Matrix_y,
-		_rotatingModifier_COV3D_Matrix_z,
 		_rotatingModifier_COV2D_Matrix_x,
 		_rotatingModifier_COV2D_Matrix_y,
-		_rotatingModifier_COV2D_Matrix_z,
-		_pivotRotX,
-		_pivotRotY,
-		_pivotRotZ,
-		rotations,
+		_rotatingModifier_COV2D_Matrix_z,		rotations,
 		opacities,
 		shs,
 		clamped,
 		cov3D_precomp,
 		colors_precomp,
-		viewmatrix, 
+		viewmatrix,
 		projmatrix,
 		cam_pos,
 		W, H,
@@ -4498,9 +4034,7 @@ void FORWARD::preprocess(
 		boxmax,
 		antialiasing,
 		t,
-		_wave,
-		_twist,
-		_bubble
+		enableDeformationCovariance
 		);
 	cudaDeviceSynchronize();
 
@@ -4509,7 +4043,7 @@ void FORWARD::preprocess(
 	cudaEventSynchronize(ev_cov_end);
 
 	if(cm.FPS){
-	
+
 		// ==========================================
 		// [로그 출력 로직]
 		// ==========================================
@@ -4562,7 +4096,7 @@ void FORWARD::preprocess(
 			measureCount = 0;
 		}
 	}
-	
-	
+
+
 
 }

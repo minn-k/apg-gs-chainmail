@@ -1,7 +1,7 @@
 #pragma once
 
 #include <vector>
-#include "GaussianGraph.hpp"
+#include "GaussianView.hpp"
 
 namespace sibr {
 
@@ -19,9 +19,6 @@ public:
 		std::vector<sibr::SHs<3>>& shs,
 		const sibr::APGGraphConfig& cfg,
 		bool enable_debug = true);
-
-private:
-	GaussianGraphBuilder _baseBuilder;
 };
 
 } // namespace sibr

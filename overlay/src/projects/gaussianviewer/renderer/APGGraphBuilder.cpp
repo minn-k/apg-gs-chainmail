@@ -2,20 +2,15 @@
 #include "GaussianView.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cmath>
-#include <limits>
 #include <map>
 #include <mutex>
 #include <numeric>
 #include <queue>
 #include <set>
-#include <unordered_map>
-#include <unordered_set>
 
 #include <Eigen/Dense>
-#include <Eigen/Geometry>
 
 // Keep the existing glm include style to avoid include path changes.
 #include <glm/gtc/quaternion.hpp>
@@ -23,135 +18,17 @@
 
 namespace {
 
-float computeDistanceWeight(float dist, float max_dist) {
-	return std::exp(-2.0f * dist / (max_dist + 1e-6f));
-}
-
-float computeOrientationWeight(const sibr::Rot& rot1, const sibr::Rot& rot2, const sibr::Pos& p1, const sibr::Pos& p2) {
-	glm::quat q1(rot1[0], rot1[1], rot1[2], rot1[3]);
-	glm::quat q2(rot2[0], rot2[1], rot2[2], rot2[3]);
-	glm::vec3 dir1 = q1 * glm::vec3(1, 0, 0);
-	glm::vec3 dir2 = q2 * glm::vec3(1, 0, 0);
-	glm::vec3 conn = glm::normalize(glm::vec3(p2.x() - p1.x(), p2.y() - p1.y(), p2.z() - p1.z()));
-	float align1 = std::abs(glm::dot(dir1, conn));
-	float align2 = std::abs(glm::dot(dir2, conn));
-	return 0.5f * (align1 + align2);
-}
-
-class OptimizedProgressReporter {
-public:
-	explicit OptimizedProgressReporter(size_t total_work) : total(total_work) {
-		start_time = std::chrono::high_resolution_clock::now();
-	}
-
-	void increment(size_t count = 1) { processed += count; }
-
-	void printProgress() {
-		std::lock_guard<std::mutex> lock(print_mutex);
-
-		auto current_time = std::chrono::high_resolution_clock::now();
-		auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
-
-		size_t current_processed = processed.load();
-		int percentage = static_cast<int>((current_processed * 100) / total);
-
-		double eta_seconds = 0.0;
-		if (current_processed > 0) {
-			eta_seconds = (elapsed.count() * (total - current_processed)) / static_cast<double>(current_processed);
-		}
-
-		std::cout << "\r[";
-		int filled_width = (percentage * 50) / 100;
-		for (int i = 0; i < 50; ++i) {
-			std::cout << (i < filled_width ? "=" : " ");
-		}
-		std::cout << "] " << percentage << "% (" << current_processed << "/" << total
-			<< ") - ETA: " << static_cast<int>(eta_seconds) << "s";
-		std::cout.flush();
-
-		if (current_processed >= total) {
-			std::cout << std::endl;
-		}
-	}
-
-private:
-	std::atomic<size_t> processed{ 0 };
-	size_t total;
-	std::chrono::high_resolution_clock::time_point start_time;
-	std::mutex print_mutex;
-};
-
-inline float fastOrientationSimilarity(const sibr::Rot& rot1, const sibr::Rot& rot2) {
-	float dot = rot1.rot[0] * rot2.rot[0] + rot1.rot[1] * rot2.rot[1] +
-		rot1.rot[2] * rot2.rot[2] + rot1.rot[3] * rot2.rot[3];
-	return std::abs(dot);
-}
-
-inline float approximateLocalDensity(const std::vector<sibr::Pos>& pos, int index,
-	const std::vector<size_t>& neighbor_indices) {
-	return static_cast<float>(neighbor_indices.size()) / (4.0f / 3.0f * M_PI * 0.1f * 0.1f * 0.1f);
-}
-
 inline float getAspectRatio(const sibr::Scale& scale) {
-	float max_scale = std::max({ scale.scale[0], scale.scale[1], scale.scale[2] });
-	float min_scale = std::min({ scale.scale[0], scale.scale[1], scale.scale[2] });
-	return max_scale / std::max(min_scale, 1e-6f);
+	const float maxScale = std::max({ scale.scale[0], scale.scale[1], scale.scale[2] });
+	const float minScale = std::min({ scale.scale[0], scale.scale[1], scale.scale[2] });
+	return maxScale / std::max(minScale, 1e-6f);
 }
 
-inline float fastDistanceSquared(const sibr::Pos& p1, const sibr::Pos& p2) {
-	float dx = p1.x() - p2.x();
-	float dy = p1.y() - p2.y();
-	float dz = p1.z() - p2.z();
-	return dx * dx + dy * dy + dz * dz;
+float orientationSim(const sibr::Rot& first, const sibr::Rot& second) {
+	const Eigen::Quaternionf q1(first.rot[0], first.rot[1], first.rot[2], first.rot[3]);
+	const Eigen::Quaternionf q2(second.rot[0], second.rot[1], second.rot[2], second.rot[3]);
+	return std::abs(q1.dot(q2));
 }
-
-struct DisjointSet {
-	std::vector<int> parent, rank;
-	explicit DisjointSet(int n) : parent(n), rank(n, 0) {
-		for (int i = 0; i < n; ++i) parent[i] = i;
-	}
-	int find(int x) {
-		return parent[x] == x ? x : parent[x] = find(parent[x]);
-	}
-	bool unite(int a, int b) {
-		a = find(a); b = find(b);
-		if (a == b) return false;
-		if (rank[a] < rank[b]) std::swap(a, b);
-		parent[b] = a;
-		if (rank[a] == rank[b]) ++rank[a];
-		return true;
-	}
-};
-
-float euclidDist(const Eigen::Vector3f& a, const Eigen::Vector3f& b) {
-	return (a - b).norm();
-}
-
-float orientationSim(const sibr::Rot& ri, const sibr::Rot& rj) {
-	Eigen::Quaternionf qi(ri.rot[0], ri.rot[1], ri.rot[2], ri.rot[3]),
-		qj(rj.rot[0], rj.rot[1], rj.rot[2], rj.rot[3]);
-	return std::abs(qi.dot(qj));
-}
-
-float aspectRatio(const sibr::Scale& s) {
-	float mx = std::max({ s.scale[0], s.scale[1], s.scale[2] });
-	float mn = std::min({ s.scale[0], s.scale[1], s.scale[2] });
-	return mx / mn;
-}
-
-struct ProgressReporter {
-	std::atomic<size_t> count;
-	size_t total;
-	explicit ProgressReporter(size_t t) : count(0), total(t) {}
-	void increment(size_t n = 1) { count += n; }
-	void print(const std::string& prefix) {
-		size_t c = count.load();
-		int pct = static_cast<int>(100.0 * c / total);
-		std::cout << "\r" << prefix
-			<< " " << c << " / " << total
-			<< " (" << pct << "%)" << std::flush;
-	}
-};
 
 template <typename Derived>
 struct KDTreeAdaptor {
@@ -177,123 +54,6 @@ struct GraphQualityMetrics {
 	}
 };
 
-struct RegionInfo {
-	std::vector<int> vertices;
-	sibr::Pos centroid;
-	float avg_density;
-	bool is_primary_region;
-	int region_id;
-};
-
-float computeLocalDensity(int vertex_idx,
-	const std::vector<sibr::Pos>& pos,
-	const nanoflann::KDTreeSingleIndexAdaptor<
-	nanoflann::L2_Simple_Adaptor<float, KDTreeAdaptor<Eigen::MatrixXf>>,
-	KDTreeAdaptor<Eigen::MatrixXf>, 3>& kdtree,
-	float radius = 0.1f,
-	int min_pts = 5) {
-	float q[3] = { pos[vertex_idx].x(), pos[vertex_idx].y(), pos[vertex_idx].z() };
-	std::vector<uint32_t> neighbors(min_pts + 10);
-	std::vector<float> distances(min_pts + 10);
-
-	size_t found = kdtree.knnSearch(q, min_pts + 5, neighbors.data(), distances.data());
-	if (found < static_cast<size_t>(min_pts)) return 0.0f;
-
-	float k_distance = std::sqrt(distances[min_pts - 1]);
-	float effective_radius = std::max(radius, k_distance);
-
-	float volume = (4.0f / 3.0f) * M_PI * std::pow(effective_radius, 3.0f);
-	return static_cast<float>(found) / volume;
-}
-
-float adaptiveThreshold(int i, int j,
-	const std::vector<float>& densities,
-	float base_threshold,
-	float density_factor = 0.3f) {
-	float avg_density = (densities[i] + densities[j]) * 0.5f;
-	float density_weight = 1.0f + density_factor * std::exp(-avg_density * 0.01f);
-	return base_threshold * density_weight;
-}
-
-float computeMultiViewConsistency(int i, int j,
-	const std::vector<sibr::Pos>& pos,
-	const std::vector<sibr::Rot>& rot) {
-	float distance = (pos[i] - pos[j]).norm();
-	float orientation_consistency = orientationSim(rot[i], rot[j]);
-	float depth_consistency = std::exp(-distance * distance / 0.01f);
-
-	return 0.6f * orientation_consistency + 0.4f * depth_consistency;
-}
-
-std::vector<RegionInfo> segmentByRegionGrowing(
-	const std::vector<sibr::Pos>& pos,
-	const std::vector<float>& densities,
-	const nanoflann::KDTreeSingleIndexAdaptor<
-	nanoflann::L2_Simple_Adaptor<float, KDTreeAdaptor<Eigen::MatrixXf>>,
-	KDTreeAdaptor<Eigen::MatrixXf>, 3>& kdtree,
-	float similarity_threshold = 0.05f,
-	int min_region_size = 100) {
-
-	const int N = static_cast<int>(pos.size());
-	std::vector<bool> visited(N, false);
-	std::vector<RegionInfo> regions;
-
-	std::vector<int> sorted_indices(N);
-	std::iota(sorted_indices.begin(), sorted_indices.end(), 0);
-	std::sort(sorted_indices.begin(), sorted_indices.end(),
-		[&densities](int a, int b) { return densities[a] > densities[b]; });
-
-	for (int seed_idx : sorted_indices) {
-		if (visited[seed_idx]) continue;
-
-		RegionInfo region;
-		region.region_id = static_cast<int>(regions.size());
-		region.avg_density = 0.0f;
-
-		std::queue<int> queue;
-		queue.push(seed_idx);
-		visited[seed_idx] = true;
-
-		sibr::Pos centroid_sum(0, 0, 0);
-
-		while (!queue.empty()) {
-			int current = queue.front();
-			queue.pop();
-
-			region.vertices.push_back(current);
-			region.avg_density += densities[current];
-			centroid_sum = centroid_sum + pos[current];
-
-			float q[3] = { pos[current].x(), pos[current].y(), pos[current].z() };
-			std::vector<uint32_t> neighbors(20);
-			std::vector<float> distances(20);
-
-			size_t found = kdtree.knnSearch(q, 20, neighbors.data(), distances.data());
-
-			for (size_t k = 1; k < found; ++k) {
-				int neighbor = static_cast<int>(neighbors[k]);
-				if (visited[neighbor]) continue;
-
-				float distance = std::sqrt(distances[k]);
-				float density_diff = std::abs(densities[current] - densities[neighbor]);
-
-				if (distance < similarity_threshold && density_diff < 0.1f) {
-					visited[neighbor] = true;
-					queue.push(neighbor);
-				}
-			}
-		}
-
-		if (region.vertices.size() >= static_cast<size_t>(min_region_size)) {
-			region.avg_density /= static_cast<float>(region.vertices.size());
-			region.centroid = centroid_sum / static_cast<float>(region.vertices.size());
-			region.is_primary_region = region.avg_density > 5.0f;
-			regions.push_back(region);
-		}
-	}
-
-	return regions;
-}
 
 GraphQualityMetrics evaluateGraphQuality(const std::set<std::pair<int, int>>& edgeSet,
 	size_t num_vertices) {
@@ -346,19 +106,6 @@ GraphQualityMetrics evaluateGraphQuality(const std::set<std::pair<int, int>>& ed
 }
 
 template<int D>
-float shAlignmentSim(const sibr::SHs<D>& sh1, const sibr::SHs<D>& sh2) {
-	constexpr int N = (D + 1) * (D + 1) * 3;
-	float dot = 0.0f, norm1 = 0.0f, norm2 = 0.0f;
-	for (int i = 0; i < N; ++i) {
-		dot += sh1.shs[i] * sh2.shs[i];
-		norm1 += sh1.shs[i] * sh1.shs[i];
-		norm2 += sh2.shs[i] * sh2.shs[i];
-	}
-	if (norm1 == 0.0f || norm2 == 0.0f) return 0.0f;
-	return dot / (std::sqrt(norm1) * std::sqrt(norm2));
-}
-
-template<int D>
 float shAlignmentSimLuminanceWeighted(const sibr::SHs<D>& sh1, const sibr::SHs<D>& sh2) {
 	constexpr int SH_PER_CHANNEL = (D + 1) * (D + 1);
 	const float w[3] = { 0.3f, 0.59f, 0.11f };
@@ -392,14 +139,10 @@ float shAlignmentSimLuminanceWeighted(const sibr::SHs<D>& sh1, const sibr::SHs<D
 	return sim;
 }
 
-float normalize(float x, float min_val, float max_val) {
-	if (max_val - min_val < 1e-6f) return 0.0f;
-	return (x - min_val) / (max_val - min_val);
-}
 
 inline float computeSimilarityDistance(
 	float dist, float oSim, float AR_diff, float shSim,
-	float sigma, float sigma_AR, float sigma_sh, float sigma_ori,
+	float sigma, float sigma_sh, float sigma_ori,
 	float w_dist, float w_ori, float w_shape, float w_sh) {
 	sigma *= 5;
 	return
@@ -426,9 +169,6 @@ inline float mapScoreDistanceToStiffness(float score_d, float d_threshold) {
 	return std::clamp(stiff, stiffMin, stiffMax);
 }
 
-inline uint64_t makeKey(int a, int b) {
-	return (uint64_t(uint32_t(a)) << 32) | uint32_t(b);
-}
 
 template<int D>
 void buildfunctionEdgeGraph2Impl(
@@ -440,6 +180,11 @@ void buildfunctionEdgeGraph2Impl(
 	const sibr::APGGraphConfig& cfg,
 	bool enable_debug = true) {
 	const int N = static_cast<int>(pos.size());
+	if (N < 2) {
+		edges.clear();
+		if (enable_debug) std::cout << "[APG] Need at least two Gaussians to build a graph.\n";
+		return;
+	}
 	float d_threshold = 0.0f;
 	auto start_time = std::chrono::high_resolution_clock::now();
 	if (enable_debug) {
@@ -461,12 +206,12 @@ void buildfunctionEdgeGraph2Impl(
 	kdtree.buildIndex();
 
 	float sigma = 1.0f;
-	float sigma_AR = 1.0f;
 	float sigma_SH = 1.0f;
 	float sigma_ORI = 1.0f;
 
-	const int max_k = cfg.default_k + 1;
-	const float d_thresholdP = cfg.d_thresholdP;
+	const size_t queryCount = std::min(static_cast<size_t>(N),
+		static_cast<size_t>(std::max(2, cfg.candidate_neighbors + 1)));
+	const float edgePercentile = std::clamp(cfg.edge_percentile, 0.0f, 100.0f);
 
 	float w_dist = cfg.w_dist;
 	float w_ori = cfg.w_ori;
@@ -485,9 +230,9 @@ void buildfunctionEdgeGraph2Impl(
 	for (int i = 0; i < N; ++i) {
 		float AR_i = getAspectRatio(scales[i]);
 		float q[3] = { pos[i].x(), pos[i].y(), pos[i].z() };
-		std::vector<uint32_t> neigh(max_k + 1);
-		std::vector<float> d2(max_k + 1);
-		size_t found = kdtree.knnSearch(q, max_k + 1, neigh.data(), d2.data());
+		std::vector<uint32_t> neigh(queryCount);
+		std::vector<float> d2(queryCount);
+		size_t found = kdtree.knnSearch(q, queryCount, neigh.data(), d2.data());
 		for (size_t k = 1; k < found; ++k) {
 			int j = static_cast<int>(neigh[k]);
 			float dist = std::sqrt(d2[k]);
@@ -521,6 +266,11 @@ void buildfunctionEdgeGraph2Impl(
 		}
 	}
 
+	if (count == 0) {
+		edges.clear();
+		if (enable_debug) std::cout << "[APG] No neighbor pairs found.\n";
+		return;
+	}
 	float dist_avg = dist_sum / count;
 	float oSim_avg = oSim_sum / count;
 	float shSim_avg = shSim_sum / count;
@@ -540,22 +290,19 @@ void buildfunctionEdgeGraph2Impl(
 		return (x - x_min) / (x_max - x_min);
 	};
 
-	std::vector<float> dist_norm_values, AR_diff_norm_values;
+	std::vector<float> dist_norm_values;
 	for (float d : dist_values)
 		dist_norm_values.push_back(minmax_norm(d, dist_min, dist_max));
-	for (float ad : AR_diffs)
-		AR_diff_norm_values.push_back(minmax_norm(ad, AR_diff_min, AR_diff_max));
 	sigma = std::max(0.1f, get_iqr(dist_norm_values) / 1.45f);
-	sigma_AR = std::max(0.1f, get_iqr(AR_diff_norm_values) / 1.45f);
 	sigma_SH = std::max(0.1f, get_iqr(sh_diffs) / 1.45f);
 	sigma_ORI = std::max(0.1f, get_iqr(ori_diffs) / 1.45f);
 
 	for (int i = 0; i < N; ++i) {
 		float AR_i = getAspectRatio(scales[i]);
 		float q[3] = { pos[i].x(), pos[i].y(), pos[i].z() };
-		std::vector<uint32_t> neigh(max_k + 1);
-		std::vector<float> d2(max_k + 1);
-		size_t found = kdtree.knnSearch(q, max_k + 1, neigh.data(), d2.data());
+		std::vector<uint32_t> neigh(queryCount);
+		std::vector<float> d2(queryCount);
+		size_t found = kdtree.knnSearch(q, queryCount, neigh.data(), d2.data());
 		for (size_t k = 1; k < found; ++k) {
 			int j = static_cast<int>(neigh[k]);
 			float dist = std::sqrt(d2[k]);
@@ -568,7 +315,7 @@ void buildfunctionEdgeGraph2Impl(
 
 			float d = computeSimilarityDistance(
 				dist_norm, oSim, AR_diff_norm, shSim,
-				sigma, sigma_AR, sigma_SH, sigma_ORI,
+				sigma, sigma_SH, sigma_ORI,
 				w_dist, w_ori, w_shape, w_sh);
 
 			d_samples.push_back(d);
@@ -576,7 +323,7 @@ void buildfunctionEdgeGraph2Impl(
 	}
 
 	std::sort(d_samples.begin(), d_samples.end());
-	size_t idx_10pct = static_cast<size_t>(d_samples.size() * d_thresholdP * 0.01f);
+	size_t idx_10pct = static_cast<size_t>(d_samples.size() * edgePercentile * 0.01f);
 	// 수정 후 (안전한 인덱싱)
 	if (d_samples.empty()) {
 		d_threshold = 0.0f;
@@ -587,11 +334,10 @@ void buildfunctionEdgeGraph2Impl(
 	}
 	if (enable_debug) {
 		std::cout << "sigma = " << sigma << std::endl;
-		std::cout << "sigma_AR = " << sigma_AR << std::endl;
 		std::cout << "sigma_ORI = " << sigma_ORI << std::endl;
 		std::cout << "sigma_SH = " << sigma_SH << std::endl;
 		std::cout << "[INFO] d samples: " << d_samples.size() << std::endl;
-		std::cout << "[INFO] d_threshold (" << d_thresholdP << "%): " << d_threshold << std::endl;
+		std::cout << "[INFO] score threshold (" << edgePercentile << "%): " << d_threshold << std::endl;
 	}
 
 	std::set<std::pair<int, int>> edgeSet;
@@ -600,18 +346,16 @@ void buildfunctionEdgeGraph2Impl(
 
 #pragma omp parallel
 	{
-		std::vector<uint32_t> neigh(max_k + 1);
-		std::vector<float> d2(max_k + 1);
+		std::vector<uint32_t> neigh(queryCount);
+		std::vector<float> d2(queryCount);
 		std::set<std::pair<int, int>> localSet;
 		std::map<std::pair<int, int>, float> localMap;
 
-		OptimizedProgressReporter progress(pos.size());
-		std::atomic<int> progress_counter{ 0 };
 #pragma omp for schedule(dynamic, 100)
 		for (int i = 0; i < N; ++i) {
 			float AR_i = getAspectRatio(scales[i]);
 			float q[3] = { pos[i].x(), pos[i].y(), pos[i].z() };
-			size_t found = kdtree.knnSearch(q, max_k + 1, neigh.data(), d2.data());
+			size_t found = kdtree.knnSearch(q, queryCount, neigh.data(), d2.data());
 
 			for (size_t k = 1; k < found; ++k) {
 				int j = static_cast<int>(neigh[k]);
@@ -627,7 +371,7 @@ void buildfunctionEdgeGraph2Impl(
 
 				float d = computeSimilarityDistance(
 					dist_norm, oSim, AR_diff_norm, shSim,
-					sigma, sigma_AR, sigma_SH, sigma_ORI,
+					sigma, sigma_SH, sigma_ORI,
 					w_dist, w_ori, w_shape, w_sh);
 
 				if (d <= d_threshold) {
@@ -695,7 +439,7 @@ void buildfunctionEdgeGraph2Impl(
 	if (enable_debug) {
 		std::cout << "\n=== Result ===" << std::endl;
 		std::cout << "Final edges: " << edges.size() << std::endl;
-		std::cout << "Edge density: " << static_cast<float>(edges.size()) / (N * (N - 1) / 2) << std::endl;
+		std::cout << "Edge density: " << static_cast<float>(edges.size()) / static_cast<float>(N * (N - 1) / 2) << std::endl;
 		std::cout << "Largest component ratio: " << quality.largest_component_ratio << std::endl;
 		std::cout << "Total time: " << duration.count() << "ms" << std::endl;
 		if (!edges.empty()) {

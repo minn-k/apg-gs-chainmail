@@ -3,7 +3,7 @@
  * GRAPHDECO research group, https://team.inria.fr/graphdeco
  * All rights reserved.
  *
- * This software is free for non-commercial, research and evaluation use 
+ * This software is free for non-commercial, research and evaluation use
  * under the terms of the LICENSE.md file.
  *
  * For inquiries contact  george.drettakis@inria.fr
@@ -53,12 +53,6 @@ namespace FORWARD
 		float operator[](int idx) const { return rot[idx]; }
 	};
 	// GaussianView.cpp?먯꽌 ?щ∼+洹몃옒???앹꽦(踰≫꽣)???앸궡怨???踰덈쭔 ?몄텧
-	/*void SetChainMailGraphFromVectors(
-		const std::vector<Pos>& cropped_pos,
-		const std::vector<Edge>& cropped_edges,
-		const std::vector<float>& cropped_opacity
-	);*/
-
 
 	constexpr float AIR = 0.13f;
 	constexpr float SKIN = 0.45f;
@@ -122,7 +116,7 @@ namespace FORWARD
 		float density;
 		float time;
 		int offset;      // neighbor array start index
-		int neighborCnt; // number of neighbors	
+		int neighborCnt; // number of neighbors
 		Element(): pos(), vel(0.0f), invMass(1.0f), density(0), time(1e9f), offset(0), neighborCnt(0) {}
 	};
 	struct cEdge {
@@ -138,7 +132,7 @@ namespace FORWARD
 		SeedGroup(std::string n, std::vector<int> idxs, glm::vec3 p)
 			: name(n), indices(idxs), pivot(p) {}
 	};
-	
+
 	class  ChainMail {
 	public:
 		// ChainMail ?대옒???대? (?먮뒗 ?ㅻ뜑)??異붽???蹂?섎뱾
@@ -155,13 +149,12 @@ namespace FORWARD
 		bool FPS = false;
 		bool loadGraph(
 			ChainMail& cm,
-			const std::vector<Pos>& cropped_pos,
-			const std::vector<Edge>& cropped_edges,
-			const std::vector<float>& cropped_opacity);
+			const std::vector<Pos>& positions,
+			const std::vector<Edge>& edges,
+			const std::vector<float>& opacities);
 		void resetTime();
 		void movePointPos(int* idx, const glm::vec3& dpos, std::vector<int>& activeSet);
 		//void setPointPos(int idx, const glm::vec3& targetPos, std::vector<int>& activeSet);
-		int findCheekPoint(FORWARD::ChainMail&);
 
 		void propagate(std::vector<int>& activeSet); // propagated && moved 湲곗?
 		void propagateStep(const std::vector<int>& currentFrontier, std::vector<int>& nextFrontier, std::vector<int>& totalActiveSet);
@@ -189,7 +182,7 @@ namespace FORWARD
 		std::vector<Edge> cropped_edges;
 		float d_thresholdP = 0.0f;
 		bool isWaveRunning() const { return waveRunning; }
-	
+
 
 		std::vector<int> getSeeds() const { return seeds; }
 		bool getRunning() const { return waveRunning; }
@@ -293,17 +286,10 @@ namespace FORWARD
 
 
 
-		const float _rotatingModifier_COV3D_Matrix_x,
-		const float _rotatingModifier_COV3D_Matrix_y,
-		const float _rotatingModifier_COV3D_Matrix_z,
 		const float _rotatingModifier_COV2D_Matrix_x,
 		const float _rotatingModifier_COV2D_Matrix_y,
 		const float _rotatingModifier_COV2D_Matrix_z,
 
-
-		const float _pivotRotX,
-		const float _pivotRotY,
-		const float _pivotRotZ,
 
 
 		const glm::vec4* rotations,
@@ -332,9 +318,7 @@ namespace FORWARD
 		float3 boxmax,
 		bool antialiasing,
 		float t,
-		bool _wave,
-		bool _twist,
-		bool _bubble);
+		bool enableDeformationCovariance);
 
 	// Main rasterization method.
 	void render(
@@ -351,7 +335,7 @@ namespace FORWARD
 		float* out_color,
 		int* id_buffer);
 
-	
+
 	// ?몃??먯꽌 ?묎렐???꾩뿭 ChainMail ?몄뒪?댁뒪
 	/*extern ChainMail g_chainmail;
 	extern bool      g_chainmail_ready;*/

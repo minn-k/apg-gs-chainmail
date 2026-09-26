@@ -216,22 +216,13 @@ int CudaRasterizer::Rasterizer::forward(
 	const float scale_modifier,
 
 
-	const float _rotatingModifier_COV3D_Matrix_x,
-	const float _rotatingModifier_COV3D_Matrix_y,
-	const float _rotatingModifier_COV3D_Matrix_z,
 	const float _rotatingModifier_COV2D_Matrix_x,
 	const float _rotatingModifier_COV2D_Matrix_y,
 	const float _rotatingModifier_COV2D_Matrix_z,
 
 
-	const float _pivotRotX,
-	const float _pivotRotY,
-	const float _pivotRotZ,
-
 	float t,
-	bool _wave,
-	bool _twist,
-	bool _bubble,
+	bool enableDeformationCovariance,
 	const float* rotations,
 	const float* cov3D_precomp,
 	const float* viewmatrix,
@@ -316,17 +307,10 @@ int CudaRasterizer::Rasterizer::forward(
 		scale_modifier,
 
 
-		_rotatingModifier_COV3D_Matrix_x,
-		_rotatingModifier_COV3D_Matrix_y,
-		_rotatingModifier_COV3D_Matrix_z,
 		_rotatingModifier_COV2D_Matrix_x,
 		_rotatingModifier_COV2D_Matrix_y,
 		_rotatingModifier_COV2D_Matrix_z,
 
-
-		_pivotRotX,
-		_pivotRotY,
-		_pivotRotZ,
 
 
 		(glm::vec4*)rotations,
@@ -354,9 +338,7 @@ int CudaRasterizer::Rasterizer::forward(
 		maxx,
 		antialiasing,
 		t,
-		_wave,
-		_twist,
-		_bubble
+		enableDeformationCovariance
 	);
 	cudaEventRecord(start_render);
 	// Compute prefix sum over full list of touched tile counts by Gaussians

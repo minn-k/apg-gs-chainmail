@@ -47,23 +47,14 @@ namespace CudaRasterizer
 			const float scale_modifier,
 
 
-			const float _rotatingModifier_COV3D_Matrix_x,
-			const float _rotatingModifier_COV3D_Matrix_y,
-			const float _rotatingModifier_COV3D_Matrix_z,
 			const float _rotatingModifier_COV2D_Matrix_x,
 			const float _rotatingModifier_COV2D_Matrix_y,
 			const float _rotatingModifier_COV2D_Matrix_z,
 
 
-			const float _pivotRotX,
-			const float _pivotRotY,
-			const float _pivotRotZ,
-
 			float t,
 
-			bool _wave,
-			bool _twist,
-			bool _bubble,
+			bool enableDeformationCovariance,
 
 
 			const float* rotations,
