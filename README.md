@@ -3,7 +3,6 @@
 <p align="center"><strong>Interactive, appearance-preserving deformation for 3D Gaussian Splatting</strong></p>
 
 <p align="center">
-  <a href="https://minn-k.github.io/3d-representation-portfolio/"><img src="https://img.shields.io/badge/Portfolio-Website-green?logo=googlechrome&logoColor=white" alt="Portfolio"></a>
   <a href="https://github.com/minn-k/3dgs-isaac-sim-xpbd"><img src="https://img.shields.io/badge/Later_work-Isaac_Sim_XPBD-blue?logo=github" alt="Isaac Sim XPBD runtime"></a>
   <img src="https://img.shields.io/badge/Language-C%2B%2F%2FCUDA-00599C?logo=cplusplus&logoColor=white" alt="C++ and CUDA">
   <img src="https://img.shields.io/badge/Viewer-SIBR_Gaussian_Viewer-4B8BBE" alt="SIBR Gaussian Viewer">
